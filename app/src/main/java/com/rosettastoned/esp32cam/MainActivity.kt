@@ -3,6 +3,7 @@ package com.rosettastoned.esp32cam
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -40,11 +41,30 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        if (grants.values.all { it }) {
+            viewModel.startProvision()
+        } else {
+            viewModel.onPermissionDenied()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
-                AppScreen(viewModel)
+                AppScreen(
+                    viewModel = viewModel,
+                    onRequestProvision = {
+                        if (viewModel.hasBlePermissions()) {
+                            viewModel.startProvision()
+                        } else {
+                            permissionLauncher.launch(viewModel.requiredPermissions())
+                        }
+                    }
+                )
             }
         }
     }
@@ -57,7 +77,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppScreen(vm: MainViewModel) {
+private fun AppScreen(vm: MainViewModel, onRequestProvision: () -> Unit) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("ESP32 Vision TTS") }) }
     ) { padding ->
@@ -70,6 +90,7 @@ private fun AppScreen(vm: MainViewModel) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             StatusSection(vm)
+            ProvisionSection(vm, onRequestProvision)
             SettingsSection(vm)
             ImageSection(vm)
             ResultSection(vm)
@@ -83,6 +104,52 @@ private fun StatusSection(vm: MainViewModel) {
         Text("서버 상태: ${vm.serverStatus}")
         Button(onClick = { vm.startServer() }) {
             Text("전송 대기 시작")
+        }
+    }
+}
+
+@Composable
+private fun ProvisionSection(vm: MainViewModel, onRequestProvision: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("ESP32 WiFi 설정 (BLE)", style = MaterialTheme.typography.titleMedium)
+        OutlinedTextField(
+            value = vm.bleSsid,
+            onValueChange = { vm.bleSsid = it },
+            label = { Text("핫스팟 이름 (SSID)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = vm.blePass,
+            onValueChange = { vm.blePass = it },
+            label = { Text("핫스팟 비밀번호") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = vm.phoneIp,
+                onValueChange = { vm.phoneIp = it },
+                label = { Text("폰 IP") },
+                singleLine = true,
+                modifier = Modifier.weight(1f)
+            )
+            OutlinedTextField(
+                value = vm.phonePort,
+                onValueChange = { vm.phonePort = it },
+                label = { Text("포트") },
+                singleLine = true,
+                modifier = Modifier.size(width = 100.dp, height = 64.dp)
+            )
+        }
+        Button(onClick = onRequestProvision, enabled = !vm.isProvisioning) {
+            Text(if (vm.isProvisioning) "전송 중..." else "ESP32로 전송")
+        }
+        vm.bleStatus?.let {
+            Text(it, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
