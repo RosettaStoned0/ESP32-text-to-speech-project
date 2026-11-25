@@ -24,4 +24,19 @@ class SettingsStore(context: Context) {
     var autoAnalyze: Boolean
         get() = prefs.getBoolean("autoAnalyze", true)
         set(value) = prefs.edit().putBoolean("autoAnalyze", value).apply()
-}
+
+    var bleSsid: String
+        get() = prefs.getString("bleSsid", "") ?: ""
+        set(value) = prefs.edit().putString("bleSsid", value).apply()
+
+    var blePass: String
+        get() = prefs.getString("blePass", "") ?: ""
+        set(value) = prefs.edit().putString("blePass", value).apply()
+
+    var phoneIp: String
+        get() = prefs.getString("phoneIp", "192.168.43.1") ?: ""
+        set(value) = prefs.edit().putString("phoneIp", value).apply()
+
+    var phonePort: String
+        get() = prefs.getString("phonePort", "8080") ?: "8080"
+        set(value) = prefs.edit().putString("phonePort", value).apply()

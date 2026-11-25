@@ -20,6 +20,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var latestBytes: ByteArray? = null
 
     private val tts = TtsSpeaker(application)
+    private val provisioner = BleProvisioner(application)
+
+    init {
+        provisioner.onResult = { result ->
+            viewModelScope.launch(Dispatchers.Main) {
+                isProvisioning = false
+                result.fold(
+                    onSuccess = { bleStatus = it },
+                    onFailure = { e -> bleStatus = e.message ?: "프로비저닝 실패" }
+                )
+            }
+        }
+        phoneIp = detectHotspotIp() ?: settings.phoneIp
+    }
 
     var serverStatus by mutableStateOf("stopped")
         private set
@@ -35,6 +49,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var port by mutableStateOf(settings.port)
     var prompt by mutableStateOf(settings.prompt)
     var autoAnalyze by mutableStateOf(settings.autoAnalyze)
+
+    var bleSsid by mutableStateOf(settings.bleSsid)
+    var blePass by mutableStateOf(settings.blePass)
+    var phoneIp by mutableStateOf(settings.phoneIp)
+    var phonePort by mutableStateOf(settings.phonePort)
+    var isProvisioning by mutableStateOf(false)
+        private set
+    var bleStatus by mutableStateOf<String?>(null)
+        private set
+
+    fun requiredPermissions(): Array<String> = provisioner.requiredPermissions()
+
+    fun hasBlePermissions(): Boolean = provisioner.hasPermissions()
+
+    fun onPermissionDenied() {
+        bleStatus = "Bluetooth 권한이 필요합니다"
+    }
+
+    fun startProvision() {
+        if (bleSsid.isBlank() || blePass.isBlank()) {
+            bleStatus = "핫스팟 이름과 비밀번호를 입력하세요"
+            return
+        }
+        settings.bleSsid = bleSsid
+        settings.blePass = blePass
+        settings.phoneIp = phoneIp
+        settings.phonePort = phonePort
+
+        val payload = buildString {
+            append("SSID:").append(bleSsid).append('\n')
+            append("PASS:").append(blePass).append('\n')
+            append("IP:").append(phoneIp).append('\n')
+            append("PORT:").append(phonePort).append('\n')
+        }
+        isProvisioning = true
+        bleStatus = "ESP32 검색 중..."
+        provisioner.provision(payload)
+    }
+
+    private fun detectHotspotIp(): String? {
+        return runCatching {
+            java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+                .firstOrNull { iface ->
+                    val name = iface.name
+                    (name.startsWith("ap") || name == "swlan0" || name == "wlan1") && iface.isUp
+                }
+                ?.interfaceAddresses
+                ?.firstOrNull { it.address is java.net.Inet4Address && it.address.isSiteLocalAddress }
+                ?.address?.hostAddress
+        }.getOrNull()
+    }
 
     fun startServer() {
         settings.apiKey = apiKey
@@ -108,6 +173,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         server?.stop()
+        provisioner.disconnect()
         tts.shutdown()
         super.onCleared()
     }
