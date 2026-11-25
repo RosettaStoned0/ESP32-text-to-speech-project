@@ -31,7 +31,9 @@
 #define BLE_SERVICE_UUID "ffe0"
 #define BLE_CHAR_UUID    "ffe1"
 
-const int   WIFI_TIMEOUT_MS = 20000;
+const int   WIFI_TIMEOUT_MS      = 15000;
+const int   RECONNECT_INTERVAL_MS = 10000;
+const int   CAMERA_RETRY_MS      = 10000;
 
 Preferences prefs;
 camera_fb_t* storedFrame = nullptr;
@@ -98,6 +100,9 @@ void updateLed();
 void waitForRelease(int pin);
 void captureFrame();
 void sendStoredFrame();
+void blinkError(int times);
+void flashLed(int times, int ms);
+void singleLedPulse(int ms);
 
 bool getStoredWifi(String& ssid, String& pass) {
   ssid = prefs.getString("ssid", "");
@@ -118,10 +123,14 @@ bool connectWifi() {
     updateLed();
     delay(50);
     if (millis() - started > WIFI_TIMEOUT_MS) {
+      Serial.println("wifi connect timeout");
+      WiFi.disconnect();
       return false;
     }
   }
-  Serial.println("wifi connected");
+
+  Serial.print("wifi connected, gateway ip: ");
+  Serial.println(WiFi.gatewayIP().toString());
   return true;
 }
 
@@ -154,16 +163,7 @@ void startBleProvisioning() {
   bleRunning = true;
 }
 
-void setup() {
-  Serial.begin(115200);
-
-  pinMode(CAPTURE_BUTTON, INPUT_PULLUP);
-  pinMode(ANALYZE_BUTTON, INPUT_PULLUP);
-  pinMode(STATUS_LED, OUTPUT);
-  digitalWrite(STATUS_LED, LOW);
-
-  prefs.begin("device", false);
-
+bool initCamera() {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -194,19 +194,37 @@ void setup() {
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("camera init failed: 0x%x\n", err);
-    ledMode = LED_ERROR;
-    return;
+    esp_camera_deinit();
+    return false;
   }
 
   sensor_t* s = esp_camera_sensor_get();
   s->set_vflip(s, 1);
   s->set_hmirror(s, 1);
-  cameraReady = true;
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(CAPTURE_BUTTON, INPUT_PULLUP);
+  pinMode(ANALYZE_BUTTON, INPUT_PULLUP);
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, LOW);
+
+  prefs.begin("device", false);
+
+  cameraReady = initCamera();
+  if (!cameraReady) {
+    ledMode = LED_ERROR;
+  }
 
   if (!connectWifi()) {
     startBleProvisioning();
-  } else {
+  } else if (cameraReady) {
     ledMode = LED_OFF;
+  } else {
+    ledMode = LED_ERROR;
   }
 }
 
@@ -218,13 +236,38 @@ void loop() {
     stopBle();
     if (!connectWifi()) {
       startBleProvisioning();
-    } else {
+    } else if (cameraReady) {
       ledMode = LED_OFF;
     }
     return;
   }
 
-  if (!cameraReady || bleRunning) {
+  static uint32_t lastCameraRetry = 0;
+  if (!cameraReady) {
+    uint32_t now = millis();
+    if (now - lastCameraRetry > CAMERA_RETRY_MS) {
+      lastCameraRetry = now;
+      Serial.println("retrying camera init");
+      if (initCamera()) {
+        cameraReady = true;
+        ledMode = (WiFi.status() == WL_CONNECTED) ? LED_OFF : LED_ERROR;
+      }
+    }
+    return;
+  }
+
+  static uint32_t lastReconnectAttempt = 0;
+  if (WiFi.status() != WL_CONNECTED && !bleRunning) {
+    uint32_t now = millis();
+    if (now - lastReconnectAttempt > RECONNECT_INTERVAL_MS) {
+      lastReconnectAttempt = now;
+      Serial.println("wifi lost, reconnecting");
+      WiFi.disconnect();
+      WiFi.reconnect();
+    }
+  }
+
+  if (bleRunning) {
     return;
   }
 
@@ -257,6 +300,8 @@ void captureFrame() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("capture failed");
+    blinkError(2);
+    ledMode = (WiFi.status() == WL_CONNECTED) ? LED_OFF : LED_ERROR;
     return;
   }
   storedFrame = fb;
@@ -267,18 +312,19 @@ void captureFrame() {
 void sendStoredFrame() {
   if (!storedFrame) {
     Serial.println("no stored frame");
+    singleLedPulse(600);
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("wifi disconnected");
-    blinkError(3);
+    blinkError(5);
+    ledMode = LED_SLOW;
     return;
   }
 
   String phoneIp = prefs.getString("ip", "192.168.43.1");
   String phonePort = prefs.getString("port", "8080");
 
-  LedMode previousMode = ledMode;
   ledMode = LED_FAST;
 
   HTTPClient http;
@@ -286,7 +332,7 @@ void sendStoredFrame() {
   if (!http.begin(url)) {
     Serial.println("http begin failed");
     blinkError(5);
-    ledMode = previousMode;
+    ledMode = LED_SLOW;
     return;
   }
   http.setTimeout(20000);
@@ -295,14 +341,19 @@ void sendStoredFrame() {
   http.end();
 
   Serial.printf("post result: %d\n", code);
-  if (code == 200) {
+  bool success = (code >= 200 && code < 300);
+  if (success) {
+    esp_camera_fb_return(storedFrame);
+    storedFrame = nullptr;
     flashLed(3, 120);
     ledMode = LED_OFF;
-  } else if (code < 0) {
-    blinkError(5);
-    ledMode = LED_SLOW;
   } else {
-    blinkError(3);
+    if (code < 0) {
+      Serial.println("send error: connection failed");
+    } else {
+      Serial.printf("send error: http %d\n", code);
+    }
+    blinkError(5);
     ledMode = LED_SLOW;
   }
 }
@@ -338,10 +389,11 @@ void blinkError(int times) {
   delay(150);
   for (int i = 0; i < times; i++) {
     digitalWrite(STATUS_LED, HIGH);
-    delay(120);
+    delay(80);
     digitalWrite(STATUS_LED, LOW);
     delay(120);
   }
+  digitalWrite(STATUS_LED, LOW);
 }
 
 void flashLed(int times, int ms) {
@@ -353,4 +405,12 @@ void flashLed(int times, int ms) {
     digitalWrite(STATUS_LED, LOW);
     delay(ms);
   }
+}
+
+void singleLedPulse(int ms) {
+  digitalWrite(STATUS_LED, LOW);
+  delay(100);
+  digitalWrite(STATUS_LED, HIGH);
+  delay(ms);
+  digitalWrite(STATUS_LED, LOW);
 }
